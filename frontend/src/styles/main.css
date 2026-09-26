@@ -1,0 +1,27 @@
+:root {
+  --el-color-primary: #616161;
+  --el-color-primary-light-3: #909090;
+  --el-color-primary-light-5: #b0b0b0;
+  --el-color-primary-light-7: #d0d0d0;
+  --el-color-primary-light-8: #dfdfdf;
+  --el-color-primary-light-9: #efefef;
+  --el-color-primary-dark-2: #4e4e4e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "PingFang SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+  background: #f5f6f8;
+  color: #303133;
+}
