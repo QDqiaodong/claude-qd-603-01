@@ -4,6 +4,7 @@ import FloorMap from '../views/FloorMap.vue'
 import SessionDesk from '../views/SessionDesk.vue'
 import GearRack from '../views/GearRack.vue'
 import MemberDesk from '../views/MemberDesk.vue'
+import TournamentDesk from '../views/TournamentDesk.vue'
 import OverviewBoard from '../views/OverviewBoard.vue'
 
 /**
@@ -45,6 +46,13 @@ export const tabs = [
     hint: '点会员卡充值、冻结或解冻；余额不足会拦住开局与余额结算'
   },
   {
+    path: '/tournaments',
+    label: '双败赛事',
+    glyph: '赛',
+    title: '双败淘汰赛事',
+    hint: '建赛自动生成胜者组/败者组/总决赛括号；二败淘汰，总决赛爆冷自动加重置赛，可受控回退纠错'
+  },
+  {
     path: '/overview',
     label: '运营概览',
     glyph: '览',
@@ -68,6 +76,7 @@ const viewByPath = {
   '/sessions': markRaw(SessionDesk),
   '/gears': markRaw(GearRack),
   '/members': markRaw(MemberDesk),
+  '/tournaments': markRaw(TournamentDesk),
   '/overview': markRaw(OverviewBoard)
 }
 
