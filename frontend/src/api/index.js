@@ -71,7 +71,17 @@ export const api = {
   freezeMember: (id) => call(http.post(`/members/${id}/freeze`)),
   unfreezeMember: (id) => call(http.post(`/members/${id}/unfreeze`)),
   memberRecharges: (id) => call(http.get(`/members/${id}/recharges`)),
-  allRecharges: () => call(http.get('/recharges'))
+  allRecharges: () => call(http.get('/recharges')),
+
+  // 模块五：双败淘汰赛事
+  tournaments: () => call(http.get('/tournaments')),
+  tournament: (id) => call(http.get(`/tournaments/${id}`)),
+  tournamentRevisions: (id) => call(http.get(`/tournaments/${id}/revisions`)),
+  createTournament: (body) => call(http.post('/tournaments', body)),
+  confirmMatchResult: (matchId, body) => call(http.post(`/tournaments/matches/${matchId}/result`, body)),
+  withdrawEntry: (tournamentId, entryId, body) =>
+    call(http.post(`/tournaments/${tournamentId}/entries/${entryId}/withdraw`, body)),
+  rollbackMatch: (matchId, body) => call(http.post(`/tournaments/matches/${matchId}/rollback`, body))
 }
 
 export default api

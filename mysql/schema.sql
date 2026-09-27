@@ -23,6 +23,11 @@ USE billiard_club;
 SET NAMES utf8mb4;
 
 SET FOREIGN_KEY_CHECKS = 0;
+DROP TABLE IF EXISTS tournament_revision_match;
+DROP TABLE IF EXISTS tournament_revision;
+DROP TABLE IF EXISTS tournament_match;
+DROP TABLE IF EXISTS tournament_entry;
+DROP TABLE IF EXISTS tournament;
 DROP TABLE IF EXISTS recharge_record;
 DROP TABLE IF EXISTS gear_rental;
 DROP TABLE IF EXISTS session_transfer;
@@ -200,6 +205,127 @@ CREATE TABLE recharge_record (
     CONSTRAINT fk_recharge_member FOREIGN KEY (member_id) REFERENCES club_member (id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '充值流水';
 
+-- ---------------------------------------------------------------------------
+-- 双败淘汰赛事（模块五，与会员/散客/球台计费完全解耦，只对 club_member 做只读引用）
+--
+-- 括号图由三张结构组成：胜者组 WINNERS、败者组 LOSERS、总决赛 GRAND_FINAL；
+-- 当总决赛里败者组冠军首次击败胜者组冠军时，再生成一场 GRAND_RESET（重置赛）。
+--
+-- 口径：
+--   1. 开赛人数不是 2 的幂时，高种子自动轮空。轮空以专门的 BYE 场次行落库
+--      （result_type='BYE'，视图层 realMatch 判否），绝不算真实比赛；拿轮空的
+--      选手自动判为该 BYE 行胜者挂到下一场入位，同一选手不会在同一轮出现两场。
+--   2. 场次之间用 winner_next_match_id / loser_next_match_id 两条有向边连成括号图，
+--      回退纠错时沿边求「派生对阵」集合；另一分支不受影响、结果原样保留。
+--   3. 选手第一次失利进入 loser_next 指向的败者组位置，第二次失利出局；
+--      退赛走 WALKOVER（对手直接晋级），退赛选手保持 WITHDRAWN，不计两败。
+--   4. tournament_revision(_match) 记录每一次受控回退的操作人、原因、
+--      纠错前后快照与受影响场次，版本可追溯。
+-- ---------------------------------------------------------------------------
+CREATE TABLE tournament (
+    id                 BIGINT       NOT NULL AUTO_INCREMENT,
+    tournament_no      VARCHAR(32)  NOT NULL COMMENT '赛事编号，唯一',
+    name               VARCHAR(128) NOT NULL COMMENT '赛事名称',
+    status             VARCHAR(16)  NOT NULL COMMENT 'DRAFT 未开赛 / RUNNING 进行中 / FINISHED 已结束',
+    player_count       INT          NOT NULL COMMENT '开赛人数（参赛者数）',
+    bracket_size       INT                   COMMENT '轮空后括号容量，2 的幂，开赛后回填',
+    champion_entry_id  BIGINT                COMMENT '冠军参赛者，冠军产生后回填',
+    created_at         DATETIME              COMMENT '创建时间',
+    updated_at         DATETIME              COMMENT '更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_tournament_no (tournament_no),
+    KEY idx_tournament_status (status)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '双败淘汰赛事';
+
+CREATE TABLE tournament_entry (
+    id             BIGINT       NOT NULL AUTO_INCREMENT,
+    tournament_id  BIGINT       NOT NULL COMMENT '所属赛事',
+    member_id      BIGINT                COMMENT '会员参赛者外键；临时参赛者（散客）为 NULL',
+    entry_type     VARCHAR(16)  NOT NULL COMMENT 'MEMBER 会员 / GUEST 临时参赛者',
+    display_name   VARCHAR(64)  NOT NULL COMMENT '参赛用名（会员取会员姓名）',
+    seed_no        INT          NOT NULL COMMENT '种子顺序，从 1 开始',
+    loss_count     INT          NOT NULL COMMENT '累计失利次数：0 在胜者组 / 1 在败者组 / 2 出局',
+    status         VARCHAR(16)  NOT NULL COMMENT 'ACTIVE 在赛 / ELIMINATED 两败出局 / WITHDRAWN 中途退赛',
+    withdraw_note  VARCHAR(255)          COMMENT '退赛说明，退赛时回填',
+    created_at     DATETIME              COMMENT '创建时间',
+    updated_at     DATETIME              COMMENT '更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_entry_tournament_seed (tournament_id, seed_no),
+    KEY idx_entry_member (member_id),
+    CONSTRAINT fk_entry_tournament FOREIGN KEY (tournament_id) REFERENCES tournament (id),
+    CONSTRAINT fk_entry_member FOREIGN KEY (member_id) REFERENCES club_member (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '赛事参赛者';
+
+ALTER TABLE tournament
+    ADD CONSTRAINT fk_tournament_champion FOREIGN KEY (champion_entry_id) REFERENCES tournament_entry (id);
+
+CREATE TABLE tournament_match (
+    id                      BIGINT       NOT NULL AUTO_INCREMENT,
+    tournament_id           BIGINT       NOT NULL COMMENT '所属赛事',
+    match_no                VARCHAR(16)  NOT NULL COMMENT '场次编号，如 W1-1 / L2-1 / GF / GR，赛事内唯一',
+    stage                   VARCHAR(16)  NOT NULL COMMENT 'WINNERS 胜者组 / LOSERS 败者组 / GRAND_FINAL 总决赛 / GRAND_RESET 重置赛',
+    round_no                INT          NOT NULL COMMENT '轮次（组内）：胜者组 W1..Wk，败者组 L1..L2k-2，总决赛单独编号',
+    seq                     INT          NOT NULL COMMENT '该轮内从左到右的序号',
+    side_a_entry_id         BIGINT                COMMENT '上半区（A 侧）参赛者，未到齐为 NULL；退赛者保留 id 并以参赛者状态标识',
+    side_b_entry_id         BIGINT                COMMENT '下半区（B 侧）参赛者，未到齐为 NULL',
+    side_a_source           VARCHAR(128)          COMMENT 'A 侧来源说明：种子直入 / 轮空直入 / 某场胜者 / 某场败者',
+    side_b_source           VARCHAR(128)          COMMENT 'B 侧来源说明',
+    winner_next_match_id    BIGINT                COMMENT '胜者去向场次（括号图边），总决赛无后续时为 NULL',
+    winner_next_slot        VARCHAR(1)            COMMENT '胜者进入下场的位置 A / B',
+    loser_next_match_id     BIGINT                COMMENT '败者去向场次（第一次失利落入败者组的位置），无后续即第二败出局',
+    loser_next_slot         VARCHAR(1)            COMMENT '败者进入下场的位置 A / B',
+    status                  VARCHAR(16)  NOT NULL COMMENT 'PENDING 等待选手到齐 / READY 双方到齐待开赛 / FINISHED 已结束 / VOID 双方退赛作废',
+    winner_entry_id         BIGINT                COMMENT '胜者',
+    loser_entry_id          BIGINT                COMMENT '败者',
+    result_type             VARCHAR(16)           COMMENT 'NORMAL 正常确认 / WALKOVER 对手退赛直接晋级 / BYE 轮空（非真实比赛），未结束为 NULL',
+    result_note             VARCHAR(255)          COMMENT '结果备注（退赛晋级时写明原因）',
+    confirmed_by            VARCHAR(64)           COMMENT '确认/操作人',
+    confirmed_at            DATETIME              COMMENT '确认时刻',
+    created_at              DATETIME              COMMENT '创建时间',
+    updated_at              DATETIME              COMMENT '更新时间',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_match_tournament_no (tournament_id, match_no),
+    KEY idx_match_tournament_round (tournament_id, stage, round_no),
+    CONSTRAINT fk_match_tournament FOREIGN KEY (tournament_id) REFERENCES tournament (id),
+    CONSTRAINT fk_match_side_a FOREIGN KEY (side_a_entry_id) REFERENCES tournament_entry (id),
+    CONSTRAINT fk_match_side_b FOREIGN KEY (side_b_entry_id) REFERENCES tournament_entry (id),
+    CONSTRAINT fk_match_winner FOREIGN KEY (winner_entry_id) REFERENCES tournament_entry (id),
+    CONSTRAINT fk_match_loser FOREIGN KEY (loser_entry_id) REFERENCES tournament_entry (id),
+    CONSTRAINT fk_match_winner_next FOREIGN KEY (winner_next_match_id) REFERENCES tournament_match (id),
+    CONSTRAINT fk_match_loser_next FOREIGN KEY (loser_next_match_id) REFERENCES tournament_match (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '赛事对阵场次';
+
+CREATE TABLE tournament_revision (
+    id                       BIGINT       NOT NULL AUTO_INCREMENT,
+    tournament_id            BIGINT       NOT NULL COMMENT '所属赛事',
+    root_match_id            BIGINT                COMMENT '回退起点场次',
+    operator                 VARCHAR(64)  NOT NULL COMMENT '纠错操作人（管理员必填）',
+    reason                   VARCHAR(255) NOT NULL COMMENT '纠错原因（必填）',
+    corrected_winner_entry_id BIGINT               COMMENT '同时更正后的胜者；为空表示仅回退到待确认',
+    created_at               DATETIME              COMMENT '纠错时刻',
+    PRIMARY KEY (id),
+    KEY idx_revision_tournament (tournament_id),
+    CONSTRAINT fk_revision_tournament FOREIGN KEY (tournament_id) REFERENCES tournament (id),
+    -- 历史审计版本不能因为括号重建（删除动态重置赛）而无法落库：源场次删除后保留操作记录，编号仍在 match_no 快照里
+    CONSTRAINT fk_revision_root_match FOREIGN KEY (root_match_id) REFERENCES tournament_match (id) ON DELETE SET NULL
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '赛事纠错版本（回退审计）';
+
+CREATE TABLE tournament_revision_match (
+    id            BIGINT       NOT NULL AUTO_INCREMENT,
+    revision_id   BIGINT       NOT NULL COMMENT '所属纠错版本',
+    match_id      BIGINT                COMMENT '场次 id；被删除的重置赛为 NULL',
+    match_no      VARCHAR(16)  NOT NULL COMMENT '场次编号快照',
+    stage         VARCHAR(16)           COMMENT '所在组快照',
+    round_no      INT                   COMMENT '轮次快照',
+    change_type   VARCHAR(16)  NOT NULL COMMENT 'ROOT 回退起点 / RESET 已结束被重置 / CLEARED 待赛场次入位被清空 / REMOVED 重置赛被删除',
+    before_json   TEXT                  COMMENT '纠错前快照（JSON）',
+    after_json    TEXT                  COMMENT '纠错重建后快照（JSON），删除的场次为 NULL',
+    created_at    DATETIME              COMMENT '创建时间',
+    PRIMARY KEY (id),
+    KEY idx_revision_match_revision (revision_id),
+    CONSTRAINT fk_revision_match_revision FOREIGN KEY (revision_id) REFERENCES tournament_revision (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT '赛事纠错受影响场次快照';
+
 -- ===========================================================================
 -- 种子数据
 -- ===========================================================================
@@ -332,4 +458,20 @@ INSERT INTO recharge_record (id, member_id, amount, before_balance, after_balanc
 --   换到已有局的台（被拒）   POST /api/sessions/1/transfer  {targetTableId:7, reason:"台呢破损", requestId:"..."}
 --   同一换台重复提交（幂等） 同一个 requestId 再发一次 -> 返回已受理，不产生第二条轨迹与分段
 --   已结束的局换台（被拒）   POST /api/sessions/6/transfer  {targetTableId:1, reason:"...", requestId:"..."}
+-- ===========================================================================
+
+-- ===========================================================================
+-- 赛事模块（双败淘汰）规则触发清单 —— 演示数据由后端启动时通过业务服务创建：
+--   T-DEMO-01 夏季双败公开赛（6 人，2 个轮空，进行中）
+--     W1-1 / W1-3 是 BYE 轮空行（非真实比赛，不能回退）；
+--     W2-2（陈曦 vs 刘思远）确认 -> 败者首次失利落入败者组 L2-2 B 侧；
+--     L2-1/L2-2 确认 -> 败者第二败，状态变 ELIMINATED；
+--     总决赛让败者组冠军击败胜者组冠军 -> 自动生成重置赛 GR，GR 结束才产生冠军。
+--   T-DEMO-02 五一擂台赛（4 人，已完赛）：GF 败者组冠军首胜 -> GR -> 陈曦夺冠。
+--   已确认不能普通改单   POST /api/tournaments/matches/{id}/result  对 FINISHED 场次
+--   受控回退+确定性重建  POST /api/tournaments/matches/{id}/rollback
+--                        {operator, reason, correctedWinnerEntryId?}
+--                        版本/操作人/原因/受影响场次在 /api/tournaments/{id}/revisions
+--   中途退赛三态         POST /api/tournaments/{tid}/entries/{eid}/withdraw
+--                        未出场（0 败）/ 已一败（1 败）保持 WITHDRAWN；已出局退赛被拦
 -- ===========================================================================
